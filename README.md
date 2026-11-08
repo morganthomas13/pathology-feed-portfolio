@@ -23,4 +23,4 @@ quality, reporting, moving results between systems, and validating the result.
 
 ## Data
 Raw CSVs aren't committed. To regenerate them:
-`java -jar synthea-with-dependencies.jar -p 1000 --exporter.csv.export true`
+`java -jar synthea-with-dependencies.jar -p 1000 -s 42 -cs 42 -r 20261108 --exporter.csv.export true --exporter.fhir.export false`
