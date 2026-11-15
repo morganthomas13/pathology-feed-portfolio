@@ -1,16 +1,88 @@
 -- Data-quality checks: Synthea data
--- Each check returns only the failing rows. Built from findings in 00_profile.sql.
+-- Built from findings in 00_profile.sql.
 
 -- ===== Priority: affect the Week 1 analysis =====
 
--- Check: each encounter CODE has exactly one DESCRIPTION
+-- Check: each encounter CODE has exactly one DESCRIPTION (and the reverse)
 -- Why: the cost and service-type questions group by CODE or DESCRIPTION
+SELECT CODE, COUNT(DISTINCT DESCRIPTION) AS n
+FROM 'encounters.csv'
+GROUP BY CODE
+HAVING COUNT(DISTINCT DESCRIPTION) > 1;
+
+SELECT DESCRIPTION, COUNT(DISTINCT CODE) AS n
+FROM 'encounters.csv'
+GROUP BY DESCRIPTION
+HAVING COUNT(DISTINCT CODE) > 1;
+-- Result: no rows either way. CODE and DESCRIPTION are one-to-one.
 
 -- Check: each encounter CODE sits under one ENCOUNTERCLASS
 -- Why: the cost question compares classes
+SELECT CODE, COUNT(DISTINCT ENCOUNTERCLASS) AS n
+FROM 'encounters.csv'
+GROUP BY CODE
+HAVING COUNT(DISTINCT ENCOUNTERCLASS) > 1;
 
--- Check: each condition CODE has exactly one DESCRIPTION
--- Why: priority only if a Week 1 question groups conditions by DESCRIPTION or semantic tag
+-- Investigate: which codes, and in which classes
+SELECT DISTINCT CODE, DESCRIPTION, ENCOUNTERCLASS
+FROM 'encounters.csv'
+WHERE CODE IN (SELECT CODE
+               FROM 'encounters.csv'
+               GROUP BY CODE
+               HAVING COUNT(DISTINCT ENCOUNTERCLASS) > 1)
+ORDER BY CODE, ENCOUNTERCLASS;
+-- Result: some CODEs appear under more than one ENCOUNTERCLASS. Not an error: ENCOUNTERCLASS classifies
+-- the individual encounter (its setting), while CODE describes what the encounter was.
+
+-- Check: each condition CODE has exactly one DESCRIPTION (and the reverse)
+-- Why: Q4 to Q9 group conditions by CODE or DESCRIPTION
+SELECT CODE, COUNT(DISTINCT DESCRIPTION) AS n
+FROM 'conditions.csv'
+GROUP BY CODE
+HAVING COUNT(DISTINCT DESCRIPTION) > 1;
+
+SELECT DESCRIPTION, COUNT(DISTINCT CODE) AS n
+FROM 'conditions.csv'
+GROUP BY DESCRIPTION
+HAVING COUNT(DISTINCT CODE) > 1;
+-- Result: no rows either way. CODE and DESCRIPTION are one-to-one.
+
+-- Check: is BASE_ENCOUNTER_COST fixed by ENCOUNTERCLASS, by CODE, or by both together?
+-- Why: Q3, Q4, Q9 and Q10 all use encounter cost
+SELECT ENCOUNTERCLASS, COUNT(DISTINCT BASE_ENCOUNTER_COST) AS n
+FROM 'encounters.csv'
+GROUP BY ENCOUNTERCLASS
+HAVING COUNT(DISTINCT BASE_ENCOUNTER_COST) > 1
+ORDER BY ENCOUNTERCLASS;
+-- Result: home, hospice, snf and urgentcare have one price each; the other classes have two.
+
+SELECT CODE, COUNT(DISTINCT BASE_ENCOUNTER_COST) AS n
+FROM 'encounters.csv'
+GROUP BY CODE
+HAVING COUNT(DISTINCT BASE_ENCOUNTER_COST) > 1
+ORDER BY CODE;
+-- Result: some CODEs have more than one price.
+
+SELECT ENCOUNTERCLASS, CODE, COUNT(DISTINCT BASE_ENCOUNTER_COST) AS n
+FROM 'encounters.csv'
+GROUP BY ENCOUNTERCLASS, CODE
+HAVING COUNT(DISTINCT BASE_ENCOUNTER_COST) > 1;
+-- Result: no rows. Each ENCOUNTERCLASS and CODE pair has exactly one price.
+-- Finding: neither ENCOUNTERCLASS nor CODE sets the price alone; the combination does (like a fee schedule).
+-- Impact: price may reflect the expected complexity of each encounter type, but not variation between
+-- individual visits of the same type (e.g. a longer visit costs the same).
+
+-- Investigate: prices for codes used in more than one class
+SELECT DISTINCT CODE, DESCRIPTION, ENCOUNTERCLASS, BASE_ENCOUNTER_COST
+FROM 'encounters.csv'
+WHERE CODE IN (SELECT CODE
+               FROM 'encounters.csv'
+               GROUP BY CODE
+               HAVING COUNT(DISTINCT ENCOUNTERCLASS) > 1)
+ORDER BY CODE, ENCOUNTERCLASS;
+-- Finding: neither ENCOUNTERCLASS nor CODE sets the price alone. Where a CODE has more than one price,
+-- the difference follows ENCOUNTERCLASS, so the price is set by the combination (like a fee schedule).
+-- Impact: cost differences in Q3, Q4 and Q9 reflect the mix of encounter types, not visit length or complexity.
 
 -- ===== Week 3 =====
 
