@@ -35,7 +35,7 @@ ORDER BY CODE, ENCOUNTERCLASS;
 -- the individual encounter (its setting), while CODE describes what the encounter was.
 
 -- Check: each condition CODE has exactly one DESCRIPTION (and the reverse)
--- Why: Q4 to Q9 group conditions by CODE or DESCRIPTION
+-- Why: Q3 to Q9 group conditions by CODE or DESCRIPTION
 SELECT CODE, COUNT(DISTINCT DESCRIPTION) AS n
 FROM 'conditions.csv'
 GROUP BY CODE
@@ -48,7 +48,7 @@ HAVING COUNT(DISTINCT CODE) > 1;
 -- Result: no rows either way. CODE and DESCRIPTION are one-to-one.
 
 -- Check: is BASE_ENCOUNTER_COST fixed by ENCOUNTERCLASS, by CODE, or by both together?
--- Why: Q3, Q4, Q9 and Q10 all use encounter cost
+-- Why: Q2, Q3, Q9 and Q10 all use encounter cost
 SELECT ENCOUNTERCLASS, COUNT(DISTINCT BASE_ENCOUNTER_COST) AS n
 FROM 'encounters.csv'
 GROUP BY ENCOUNTERCLASS
@@ -68,9 +68,6 @@ FROM 'encounters.csv'
 GROUP BY ENCOUNTERCLASS, CODE
 HAVING COUNT(DISTINCT BASE_ENCOUNTER_COST) > 1;
 -- Result: no rows. Each ENCOUNTERCLASS and CODE pair has exactly one price.
--- Finding: neither ENCOUNTERCLASS nor CODE sets the price alone; the combination does (like a fee schedule).
--- Impact: price may reflect the expected complexity of each encounter type, but not variation between
--- individual visits of the same type (e.g. a longer visit costs the same).
 
 -- Investigate: prices for codes used in more than one class
 SELECT DISTINCT CODE, DESCRIPTION, ENCOUNTERCLASS, BASE_ENCOUNTER_COST
@@ -80,9 +77,10 @@ WHERE CODE IN (SELECT CODE
                GROUP BY CODE
                HAVING COUNT(DISTINCT ENCOUNTERCLASS) > 1)
 ORDER BY CODE, ENCOUNTERCLASS;
--- Finding: neither ENCOUNTERCLASS nor CODE sets the price alone. Where a CODE has more than one price,
--- the difference follows ENCOUNTERCLASS, so the price is set by the combination (like a fee schedule).
--- Impact: cost differences in Q3, Q4 and Q9 reflect the mix of encounter types, not visit length or complexity.
+-- Finding: neither ENCOUNTERCLASS nor CODE sets the price alone; the combination does (like a fee schedule).
+-- Impact: price may reflect the expected complexity of each encounter type, but not variation between
+-- individual visits of the same type (e.g. a longer visit costs the same).
+-- Impact: cost differences in Q2, Q3 and Q9 reflect the mix of encounter types, not visit length or complexity.
 
 -- ===== Week 3 =====
 
