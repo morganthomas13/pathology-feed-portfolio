@@ -118,7 +118,9 @@ DESCRIBE 'encounters.csv';
 -- Column profile
 SUMMARIZE 'encounters.csv';
 -- Obs: Earliest START is 1917, consistent with the oldest patients (born 1915).
--- Obs: Every START has a STOP. NULLs only in REASONCODE and REASONDESCRIPTION.
+-- Obs: Every START has a STOP. NULLs only in REASONCODE and REASONDESCRIPTION (about 35%; filled for ~65%).
+-- Obs: TOTAL_CLAIM_COST is heavily skewed. Mean $2,688 against a median of about $906 (SUMMARIZE quartiles are
+--      approximate); middle half about $525-2,208.
 -- Obs: approx_unique: CODE and DESCRIPTION about equal; ENCOUNTERCLASS smaller; BASE_ENCOUNTER_COST about 11.
 --      These are estimates, so exact checks below.
 -- Q?: Encounter duration (STOP - START): are any negative or implausibly long?

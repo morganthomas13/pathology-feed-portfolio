@@ -17,7 +17,7 @@ HAVING COUNT(DISTINCT CODE) > 1;
 -- Result: no rows either way. CODE and DESCRIPTION are one-to-one.
 
 -- Check: each encounter CODE sits under one ENCOUNTERCLASS
--- Why: the cost question compares classes
+-- Why: Q10 compares classes, and price depends on the class
 SELECT CODE, COUNT(DISTINCT ENCOUNTERCLASS) AS n
 FROM 'encounters.csv'
 GROUP BY CODE
@@ -78,9 +78,63 @@ WHERE CODE IN (SELECT CODE
                HAVING COUNT(DISTINCT ENCOUNTERCLASS) > 1)
 ORDER BY CODE, ENCOUNTERCLASS;
 -- Finding: neither ENCOUNTERCLASS nor CODE sets the price alone; the combination does (like a fee schedule).
--- Impact: price may reflect the expected complexity of each encounter type, but not variation between
--- individual visits of the same type (e.g. a longer visit costs the same).
--- Impact: cost differences in Q2, Q3 and Q9 reflect the mix of encounter types, not visit length or complexity.
+
+-- Investigate: every price, by class and by code
+SELECT DISTINCT ENCOUNTERCLASS, BASE_ENCOUNTER_COST
+FROM 'encounters.csv'
+ORDER BY BASE_ENCOUNTER_COST DESC;
+
+SELECT DISTINCT CODE, DESCRIPTION, ENCOUNTERCLASS, BASE_ENCOUNTER_COST
+FROM 'encounters.csv'
+ORDER BY BASE_ENCOUNTER_COST DESC, ENCOUNTERCLASS, CODE;
+-- Finding: two price tiers. Named visit and admission codes cost $110.92-146.18 (highest in emergency and
+--   inpatient); generic codes ("Encounter for problem", "Follow-up visit", "Check up") cost $75.00-87.71.
+--   Within a CODE, class adds a small difference (virtual lowest). Both tiers are mostly "(procedure)", so the
+--   SNOMED semantic tag doesn't explain price; the split between named and generic codes does.
+
+-- Investigate: total and average base cost by class
+SELECT ENCOUNTERCLASS,
+       ROUND(SUM(BASE_ENCOUNTER_COST),2) AS total_base,
+       ROUND(AVG(BASE_ENCOUNTER_COST),2) AS avg_base
+FROM 'encounters.csv'
+GROUP BY ENCOUNTERCLASS
+ORDER BY total_base DESC;
+-- Finding: ambulatory ($3.75M), wellness ($1.92M) and outpatient ($1.01M) hold about 88% of the $7.58M total;
+--   emergency and inpatient together hold about 6%.
+-- Impact: inpatient admissions (including ICU) cost the same as emergency visits ($146.18), so base cost doesn't
+--   reflect real-world acuity or length of stay, and volume dominates any total. "Volume drives cost" holds for
+--   this dataset but wouldn't carry over to real costs, where admissions cost far more than visits.
+-- Impact: on base cost, differences in Q2, Q3, Q9 and Q10 reflect the mix of encounter types, not visit length
+--   or complexity.
+
+-- Check: TOTAL_CLAIM_COST range and distinct values, and whether it varies within a class and CODE pair
+-- Why: Q2, Q3, Q9 and Q10 show it alongside base cost; Week 2 chooses which measure to carry forward
+SELECT MAX(TOTAL_CLAIM_COST) AS max_claim_cost,
+       MIN(TOTAL_CLAIM_COST) AS min_claim_cost,
+       (SELECT COUNT(*) FROM
+                            (SELECT DISTINCT CODE, ENCOUNTERCLASS FROM 'encounters.csv')
+                            ) AS code_enc_pairs,
+       (SELECT COUNT(*) FROM
+                            (SELECT DISTINCT CODE, ENCOUNTERCLASS, TOTAL_CLAIM_COST FROM 'encounters.csv')
+                            ) AS code_enc_total_pairs,
+       COUNT(DISTINCT BASE_ENCOUNTER_COST) AS distinct_base_cost,
+       COUNT(DISTINCT TOTAL_CLAIM_COST) AS distinct_claim_cost,
+       (SELECT COUNT(*) FROM (SELECT DISTINCT TOTAL_CLAIM_COST - BASE_ENCOUNTER_COST FROM 'encounters.csv')) AS distinct_total_sub_base
+  FROM 'encounters.csv';
+
+-- Check: rows where TOTAL_CLAIM_COST < BASE_ENCOUNTER_COST
+SELECT COUNT(*) AS n
+  FROM 'encounters.csv'
+ WHERE BASE_ENCOUNTER_COST > TOTAL_CLAIM_COST;
+
+-- Result: no NULLs (see 00_profile.sql). 0 rows below base; 59,347 (88%) above base; 7,974 (12%) equal to base.
+-- Finding: consistent with TOTAL_CLAIM_COST being base plus extras (e.g. medications, procedures). It varies per
+--   visit (17,995 distinct class, CODE and cost combinations against 78 class and CODE pairs) and ranges from
+--   $75 to $234,387.31, against $75-146.18 for base.
+-- Finding: heavily right-skewed (see 00_profile.sql). Mean $2,688 against a median of about $906; middle half
+--   about $525-2,208. Base cost is about 4% of total claim cost on average.
+-- Q?: The $234k claim is one encounter with three conditions (see Q3); which encounter types carry the other
+--   large claims?
 
 -- ===== Week 3 =====
 
