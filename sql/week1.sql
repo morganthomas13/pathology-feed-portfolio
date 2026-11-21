@@ -6,8 +6,8 @@
 -- find which chronic or recurring conditions they carry, then see who else has those conditions and what it costs.
 --
 -- Assumptions:
--- - "Preventable" is approximated as chronic (no STOP date) or recurring (same condition recorded
---   more than once for a patient), inspired by AIHW's potentially preventable hospitalisations.
+-- - "Preventable" is approximated as chronic (an open episode, no STOP date) or recurring (two or more closed
+--   episodes of the same disorder; see below), inspired by AIHW's potentially preventable hospitalisations.
 --   A proper mapping to the AIHW condition list is out of scope for Week 1.
 -- - Demographics means gender and county (age needs date arithmetic, so it's covered in Week 2).
 -- - Cost: BASE_ENCOUNTER_COST is fixed per ENCOUNTERCLASS and CODE pair (see dq_checks.sql) and only ranges
@@ -23,6 +23,9 @@
 --   social determinants, admin flags and history items recorded as findings or situations, and lines up with
 --   the AIHW list (all disorders). It also drops clinical risk factors such as prediabetes and obesity, and a
 --   few untagged rows (e.g. Gout); refining the list is a candidate for Week 2 (CASE).
+-- - Recurring means two or more closed episodes (with a STOP date) of the same disorder for a patient. An open
+--   episode counts towards chronic only, so a patient with one closed and one open episode is chronic, not
+--   recurring. Chronic and recurring stay separate until they're combined at patient level (Q6 to Q9).
 -- - conditions.ENCOUNTER is the encounter where a condition was recorded (diagnosis, or the start of a new
 --   episode), not every visit where it was managed. Checked: hypertension has 234 rows for 234 patients.
 --   So Q3 covers recording encounters only and undercounts chronic conditions; Q9 works at patient level.
@@ -199,7 +202,7 @@ ORDER BY num_enc DESC, total_enc_claim_with_disorder DESC;
 -- ===== The preventable group =====
 
 -- Q4. Which conditions are most often ongoing (no STOP date)?
--- Tables: conditions | Technique: WHERE, GROUP BY
+-- Tables: conditions | Technique: WHERE, GROUP BY, COUNT(DISTINCT) patients
 -- Answer: Ongoing disorders are led by a cardiometabolic cluster: essential hypertension (234 patients, 20.19%),
 --   ischemic heart disease (186, 16.05%), metabolic syndrome (158, 13.63%), hyperlipidemia (120, 10.35%), and
 --   type 2 diabetes with its kidney complications (diabetic kidney disorder 100, microalbuminuria 80, type 2
@@ -212,38 +215,259 @@ ORDER BY num_enc DESC, total_enc_claim_with_disorder DESC;
 --   These likely ended at death or were open on the reference date, so "no STOP" isn't always chronic.
 -- Q?: Do acute disorders with no STOP belong to deceased patients? (Week 2: compare with DEATHDATE.)
 
-SELECT CODE, DESCRIPTION, COUNT (*) AS n
+-- Unfiltered, for comparison: admin and social findings lead
+SELECT CODE, DESCRIPTION, COUNT(*) AS n
 FROM 'conditions.csv'
-WHERE STOP IS NULL 
+WHERE STOP IS NULL
 GROUP BY CODE, DESCRIPTION
 ORDER BY n DESC;
 
-SELECT CODE, 
-       DESCRIPTION, 
+SELECT CODE,
+       DESCRIPTION,
        COUNT(DISTINCT PATIENT) AS patients,
-       ROUND(COUNT(DISTINCT PATIENT) * 100.0 / (SELECT COUNT(*) FROM 'patients.csv'),2) AS percent_total       
+       ROUND(COUNT(DISTINCT PATIENT) * 100.0 / (SELECT COUNT(*) FROM 'patients.csv'),2) AS percent_total
 FROM 'conditions.csv'
-WHERE STOP IS NULL AND DESCRIPTION LIKE '%(disorder)' 
+WHERE STOP IS NULL AND DESCRIPTION LIKE '%(disorder)'
 GROUP BY CODE, DESCRIPTION
 ORDER BY patients DESC;
 
 -- Q5. Which conditions most often recur for the same patient?
--- Tables: conditions | Technique: GROUP BY with HAVING, inside a subquery in FROM
--- Answer:
+-- Tables: conditions | Technique: CTE with GROUP BY and HAVING (clearer than a subquery in FROM here)
+-- Approach: count closed episodes of each disorder per patient, keep those with more than one, then roll up by
+--   condition: patients affected, share of all patients, episodes recorded and episodes per affected patient.
+-- Answer: Gingivitis recurs far more than any other disorder: 682 patients (58.84%) have had more than one closed
+--   episode, averaging 4.0 each, and it makes up 51.10% of recurring disorder records. Few gingivitis records are
+--   ongoing (19), so recurrence is where its volume comes from. Viral sinusitis (314 patients), gingival disease
+--   (190), acute viral pharyngitis (142) and dental caries (138) follow, at about 2-3 episodes each.
+--   Overdose stands out: 42 patients average 3.74 episodes, suggesting a smaller at-risk group that needs targeted
+--   interventions (mental health, medication management) rather than broad prevention.
+--   Oral health looks like the strongest recurring prevention target; whether it drives cost is tested in Q9.
+--   Caveats: the respiratory infections recur often, but most have no vaccine and fall outside the AIHW categories
+--   (good hygiene may still help). Only recurrers were counted, so we can't yet say whether one overdose predicts another.
+-- Q?: Of patients with one overdose, how many go on to have a second?
+-- Q?: Do flu vaccinations (immunizations.csv) relate to respiratory episodes?
+-- Timing: planning Q5-Q7 15 min; Q5 6:13-6:44, revised 7:16-7:26.
+
+WITH recurring_disorders AS (
+  SELECT PATIENT,
+         CODE,
+         DESCRIPTION,
+         COUNT(DESCRIPTION) AS disorder_count
+  FROM 'conditions.csv'
+  WHERE STOP IS NOT NULL AND DESCRIPTION LIKE '%(disorder)'
+  GROUP BY PATIENT, CODE, DESCRIPTION
+  HAVING COUNT(DESCRIPTION) > 1
+)
+SELECT CODE,
+       DESCRIPTION,
+       COUNT(DISTINCT PATIENT) AS n_patients,
+       ROUND(COUNT(DISTINCT PATIENT) * 100.0 / (SELECT COUNT(*) FROM 'patients.csv'), 2) AS p_patients,
+       SUM(disorder_count) AS n_recorded_disorders,
+       ROUND(SUM(disorder_count) * 100.0 / (SELECT SUM(disorder_count) FROM recurring_disorders), 2) AS p_recorded_disorders,
+       ROUND(SUM(disorder_count) * 1.0 / COUNT(DISTINCT PATIENT), 2) AS episodes_p_patient
+FROM recurring_disorders
+GROUP BY CODE, DESCRIPTION
+ORDER BY n_patients DESC;
 
 -- ===== Who has them =====
 
 -- Q6. Are frequent visitors (the top 10%) more likely than all patients to have a chronic or recurring condition?
--- Tables: patients, encounters, conditions | Technique: join of the top-10% CTE to conditions, COUNT(DISTINCT) patients
--- Answer:
+-- Tables: patients, encounters, conditions | Technique: CTE with UNION; IN and NOT IN against the top-10% CTE;
+--   scalar subqueries for group sizes
+-- Approach: build one list of patients with at least one chronic or recurring disorder (UNION of the two
+--   definitions, duplicates removed), then compare the share of the top 10%, the other 90% and all patients who
+--   appear on it. A yes/no per patient is used rather than episode counts, which exposure time would inflate.
+-- Answer: Almost every frequent visitor has a chronic or recurring disorder: 99.14% (115 of 116), against 88.30%
+--   of the other 90% (921 of 1,043) and 89.39% of all patients (1,036 of 1,159). The groups reconcile
+--   (115 + 921 = 1,036). The 11-point gap fits the idea that these conditions build up with age and longer
+--   records, but that needs validating with the Week 2 age adjustment and the group's actual ages.
+--   Caveat: the definition is broad. Gingivitis recurrence alone qualifies 59% of patients (Q5), and any open
+--   disorder counts as chronic, including some that aren't preventable in the AIHW sense (e.g. scoliosis,
+--   Alzheimer's disease). With nearly everyone qualifying, "at least one" separates groups poorly; mapping to
+--   the AIHW categories (Week 2) or counting distinct conditions per patient should separate them better.
+--   So what: if these conditions build up over a lifetime, prevention may need to start early.
+-- Q?: Distinct chronic and recurring conditions per patient, top 10% against the rest.
+-- Timing: planning Q5-Q7 15 min; Q6 11:45-12:29.
+
+WITH chronic_recurring_list AS (
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NULL AND DESCRIPTION LIKE '%(disorder)'      -- chronic: any open episode
+
+    UNION
+
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NOT NULL AND DESCRIPTION LIKE '%(disorder)'  -- recurring: 2+ closed episodes
+    GROUP BY PATIENT, CODE
+    HAVING COUNT(*) > 1
+),
+top_ten_percent AS (
+  SELECT p.Id AS patient
+  FROM 'patients.csv' AS p
+  LEFT JOIN 'encounters.csv' AS e
+    ON p.Id = e.PATIENT
+  GROUP BY p.Id
+  ORDER BY COUNT(e.Id) DESC, p.Id
+  LIMIT 116
+)
+
+SELECT (SELECT COUNT(*) FROM top_ten_percent) AS n_top_ten,
+       COUNT(DISTINCT PATIENT) AS top_chronic_or_recurring,
+       ROUND(COUNT(DISTINCT PATIENT) * 100.0 / (SELECT COUNT(*) FROM top_ten_percent),2) AS top_cr_percent
+  FROM chronic_recurring_list
+ WHERE PATIENT IN (SELECT patient FROM top_ten_percent);
+
+SELECT (SELECT COUNT(*) FROM 'patients.csv' WHERE Id NOT IN (SELECT patient FROM top_ten_percent)) AS n_rest,
+       COUNT(DISTINCT PATIENT) AS rest_chronic_or_recurring,
+       ROUND(COUNT(DISTINCT PATIENT) * 100.0 / (SELECT COUNT(*) FROM 'patients.csv' WHERE Id NOT IN (SELECT patient FROM top_ten_percent)),2) AS rest_cr_percent
+  FROM chronic_recurring_list
+ WHERE PATIENT NOT IN (SELECT patient FROM top_ten_percent);
+
+SELECT (SELECT COUNT(*) FROM 'patients.csv') AS n_all,
+       COUNT(DISTINCT PATIENT) AS all_chronic_or_recurring,
+       ROUND(COUNT(DISTINCT PATIENT) * 100.0 / (SELECT COUNT(*) FROM 'patients.csv'),2) AS all_cr_percent
+  FROM chronic_recurring_list;
 
 -- Q7. How many patients have at least one chronic or recurring condition, by gender and county?
--- Tables: patients, conditions | Technique: IN subqueries
--- Answer:
+-- Tables: patients, conditions | Technique: CTE with UNION; LEFT JOIN from patients (base) to the list;
+--   CTE for the overall rate; expected against actual counts
+-- Approach: keep every patient, flag those on the chronic or recurring list, then compare each group's rate with
+--   the overall rate, as patients (actual minus expected) as well as percentages.
+-- Answer: Gender makes no difference: 89.33% of women (519 of 581) and 89.45% of men (517 of 578) have a chronic
+--   or recurring disorder, so on this definition prevention doesn't need a gender-based approach.
+--   County: every county is within about 7 patients of what the overall rate (89.39%) predicts, so the spread
+--   follows the population, which reflects how widespread these conditions are on this definition. Norfolk has
+--   the largest gap (79 against 85.81 expected); counties with one patient (Dukes, Nantucket) can't be read.
+--   Barnstable is only about 3 patients above expected, so chronic or recurring conditions don't explain its
+--   double share of frequent visitors (Q1); age or administrative visits may.
+--   Caveat: the definition is broad (see Q6), so real differences between groups may be hidden.
+-- Q?: Is Norfolk's lower rate still there after regrouping (AIHW categories, age)?
+-- Q?: Does age or visit type explain Barnstable's frequent visitors? (Week 2 age; Q10 encounter class;
+--   candidate "encounters per patient by county".)
+-- Timing: planning Q5-Q7 15 min; Q7 12:31-13:19.
+
+-- By county
+WITH chronic_recurring_list AS (
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NULL AND DESCRIPTION LIKE '%(disorder)'      -- chronic: any open episode
+
+    UNION
+
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NOT NULL AND DESCRIPTION LIKE '%(disorder)'  -- recurring: 2+ closed episodes
+    GROUP BY PATIENT, CODE
+    HAVING COUNT(*) > 1
+),
+overall AS (
+    SELECT (SELECT COUNT(*) FROM chronic_recurring_list) * 1.0
+           / (SELECT COUNT(*) FROM 'patients.csv') AS rate
+)
+SELECT p.COUNTY,
+       COUNT(*) AS n_patients,
+       COUNT(DISTINCT cr.PATIENT) AS cr_patients,
+       ROUND(COUNT(DISTINCT cr.PATIENT) * 100.0 / COUNT(*), 2) AS percent_with_cr,
+       ROUND(COUNT(*) * (SELECT rate FROM overall), 2) AS exp_cr_patients,
+       ROUND(COUNT(DISTINCT cr.PATIENT) - COUNT(*) * (SELECT rate FROM overall), 2) AS gap_patients
+FROM 'patients.csv' AS p
+LEFT JOIN chronic_recurring_list AS cr
+  ON cr.PATIENT = p.Id
+GROUP BY p.COUNTY
+ORDER BY gap_patients;
+
+-- By gender
+WITH chronic_recurring_list AS (
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NULL AND DESCRIPTION LIKE '%(disorder)'      -- chronic: any open episode
+
+    UNION
+
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NOT NULL AND DESCRIPTION LIKE '%(disorder)'  -- recurring: 2+ closed episodes
+    GROUP BY PATIENT, CODE
+    HAVING COUNT(*) > 1
+)
+SELECT p.GENDER,
+       COUNT(*) AS n_patients,
+       COUNT(DISTINCT cr.PATIENT) AS cr_patients,
+       ROUND(COUNT(DISTINCT cr.PATIENT) * 100.0 / COUNT(*), 2) AS percent_with_cr
+FROM 'patients.csv' AS p
+LEFT JOIN chronic_recurring_list AS cr
+  ON cr.PATIENT = p.Id
+GROUP BY p.GENDER;
 
 -- Q8. How do patients with neither a chronic nor a recurring condition compare, by gender and county?
--- Tables: patients, conditions | Technique: NOT EXISTS (correlated subquery)
--- Answer:
+-- Tables: patients, conditions | Technique: correlated NOT EXISTS inside SUM(CASE ...), patients as the base table
+-- Approach: keep every patient so COUNT(*) gives each group's total, and count only those the NOT EXISTS search
+--   comes back empty for (not on the chronic or recurring list).
+-- Answer: 123 patients (10.61%) have neither a chronic nor a recurring disorder. This mirrors Q7 and reconciles
+--   with it in every county (e.g. Norfolk 96 - 17 = 79). Norfolk has the highest share without (17.71%) and
+--   Barnstable among the lowest (5.80%), the same pattern as Q7 and within a few patients of expected. Gender is
+--   even (62 women, 10.67%; 61 men, 10.55%). The value here is the technique and the reconciliation, not a new
+--   finding.
+-- Notes: a LEFT JOIN to the list with WHERE cr.PATIENT IS NULL (the anti-join from the orphan checks) gives the
+--   same result; NOT EXISTS was used here to practise the correlated pattern.
+-- Q?: Who are the 123? Possibly younger patients with shorter records (exposure time); test with age in Week 2.
+-- Timing: Q8 13:20-13:50.
+
+-- By county
+WITH chronic_recurring_list AS (
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NULL AND DESCRIPTION LIKE '%(disorder)'      -- chronic: any open episode
+
+    UNION
+
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NOT NULL AND DESCRIPTION LIKE '%(disorder)'  -- recurring: 2+ closed episodes
+    GROUP BY PATIENT, CODE
+    HAVING COUNT(*) > 1
+)
+SELECT p.COUNTY,
+       COUNT(*) AS n_patients,
+       SUM(CASE WHEN NOT EXISTS (SELECT 1
+                                 FROM chronic_recurring_list AS cr
+                                 WHERE cr.PATIENT = p.Id)
+                THEN 1 ELSE 0 END) AS no_cr_patients,
+       ROUND(SUM(CASE WHEN NOT EXISTS (SELECT 1
+                                       FROM chronic_recurring_list AS cr
+                                       WHERE cr.PATIENT = p.Id)
+                      THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS percent_no_cr
+FROM 'patients.csv' AS p
+GROUP BY p.COUNTY
+ORDER BY n_patients DESC;
+
+-- By gender
+WITH chronic_recurring_list AS (
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NULL AND DESCRIPTION LIKE '%(disorder)'      -- chronic: any open episode
+
+    UNION
+
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NOT NULL AND DESCRIPTION LIKE '%(disorder)'  -- recurring: 2+ closed episodes
+    GROUP BY PATIENT, CODE
+    HAVING COUNT(*) > 1
+)
+SELECT p.GENDER,
+       COUNT(*) AS n_patients,
+       SUM(CASE WHEN NOT EXISTS (SELECT 1
+                                 FROM chronic_recurring_list AS cr
+                                 WHERE cr.PATIENT = p.Id)
+                THEN 1 ELSE 0 END) AS no_cr_patients,
+       ROUND(SUM(CASE WHEN NOT EXISTS (SELECT 1
+                                       FROM chronic_recurring_list AS cr
+                                       WHERE cr.PATIENT = p.Id)
+                      THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS percent_no_cr
+FROM 'patients.csv' AS p
+GROUP BY p.GENDER;
 
 -- ===== What it costs =====
 
@@ -275,6 +499,7 @@ ORDER BY patients DESC;
 -- Do long encounters cluster by condition?
 -- Observations per encounter by encounter duration
 -- Typical income, expenses and coverage by area (LAT and LON)
+-- Map disorders to AIHW preventable categories with CASE (document each judgement call)
 -- Hypothesis: encounter duration has a narrow range within each ENCOUNTERCLASS and CODE pair,
 -- and BASE_ENCOUNTER_COST rises with average duration across pairs.
 
