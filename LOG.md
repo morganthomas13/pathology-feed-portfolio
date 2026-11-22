@@ -62,3 +62,27 @@
 - **Confused me:** Whether Q5 needed a subquery in FROM when a CTE reads better. Whether an open episode should count towards recurring. Why Q6 gave 18,523 recurring episodes for 116 patients. Whether to count episodes or a yes/no per patient. What the UNION list actually filters. Why county shares just tracked county size. Why my expected-gap column made no sense. How NOT EXISTS works with SELECT 1.
 - **Fixed it:** Kept the CTE: it's what production uses and coverage was already met. Recurring now means 2+ closed episodes, with open episodes counted as chronic only (stated as an assumption). A subset can't exceed the whole, so 18,523 against 5,337 total pointed to a join fan-out: aggregate to one row per patient before joining. "More likely" needs a yes/no per patient, which also resists exposure time. GROUP BY PATIENT, CODE with HAVING checks recurrence per patient. UNION removes duplicates; UNION ALL keeps them. A within-group rate needs the group's own denominator, so patients is the base with a LEFT JOIN to the list. Compare actual with expected in patients, not patients minus percent, and calculate the overall rate in a CTE rather than typing it in. A CTE only lasts for one statement. NOT EXISTS (resolves the 15 Nov open item): a match returns a row, so NOT EXISTS is false; it's true only when the search comes back empty. SUM(CASE WHEN NOT EXISTS ...) counts within groups while COUNT(*) keeps the totals. The LEFT JOIN + IS NULL anti-join does the same job.
 **Open:** NOT EXISTS feels less natural through low use. Plan 2–3 short spaced drills and one cold, unaided self-test before Gate 1.
+
+## Sun 22 Nov
+
+**Done**
+- Q9 and Q10 answered on both cost measures. All ten Week 1 questions are complete.
+- Q10 header added; session timings removed from week1.sql.
+
+**Findings**
+- Q9: chronic-or-recurring patients cost less per encounter ($2,670.63 vs $3,107.05 claim) but about 2.4x more per patient ($166,558.71 vs $68,430.98). Volume drives it: about 62.4 encounters each vs 22.0. They account for 95.35% of claim cost.
+- Q10: 41,489 encounters (61.6%) have no condition recorded, carrying 65.2% of claim cost. Conditions are recorded at diagnosis, so this group includes follow-ups and ongoing care, not just unrelated visits.
+- Base cost per encounter barely moves by class ($100.14 to $142.58) while claim cost ranges from $614.65 to $29,444.02. Total claim cost is the better measure for Week 2.
+
+**Learned**
+- WHERE removes rows (like a spreadsheet filter). CASE in SELECT keeps every row and flags it (like a helper column). Use CASE when the query needs the group's total as well as the subset.
+- NOT IN fails silently if the list contains a NULL: every row drops. Safe here because profiling showed conditions.PATIENT is never NULL. NOT EXISTS has no such trap.
+- ROUND goes around the whole calculation, not inside it: ROUND(SUM(x) / COUNT(DISTINCT y), 2).
+- LEFT JOIN + IS NULL anti-join: an INNER JOIN with the same WHERE returns 0 rows, because unmatched rows are gone before the filter runs.
+- Reconcile every split against the total (64,612 + 2,709 = 67,321; 67,321 - 25,832 = 41,489).
+
+**Open**
+- NOT EXISTS feels less natural through low use. Plan 2–3 short spaced drills and one cold, unaided self-test before Gate 1.
+- Test what the 16,128 no-condition "Encounter for problem" visits are for, using REASONDESCRIPTION.
+- Re-run Q9 per year of record to remove the exposure-time effect.
+- Rewrite Q2 and Q9 as CASE + GROUP BY instead of scalar subquery columns.

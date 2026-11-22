@@ -246,7 +246,6 @@ ORDER BY patients DESC;
 --   (good hygiene may still help). Only recurrers were counted, so we can't yet say whether one overdose predicts another.
 -- Q?: Of patients with one overdose, how many go on to have a second?
 -- Q?: Do flu vaccinations (immunizations.csv) relate to respiratory episodes?
--- Timing: planning Q5-Q7 15 min; Q5 6:13-6:44, revised 7:16-7:26.
 
 WITH recurring_disorders AS (
   SELECT PATIENT,
@@ -287,7 +286,6 @@ ORDER BY n_patients DESC;
 --   the AIHW categories (Week 2) or counting distinct conditions per patient should separate them better.
 --   So what: if these conditions build up over a lifetime, prevention may need to start early.
 -- Q?: Distinct chronic and recurring conditions per patient, top 10% against the rest.
--- Timing: planning Q5-Q7 15 min; Q6 11:45-12:29.
 
 WITH chronic_recurring_list AS (
     SELECT PATIENT
@@ -345,7 +343,6 @@ SELECT (SELECT COUNT(*) FROM 'patients.csv') AS n_all,
 -- Q?: Is Norfolk's lower rate still there after regrouping (AIHW categories, age)?
 -- Q?: Does age or visit type explain Barnstable's frequent visitors? (Week 2 age; Q10 encounter class;
 --   candidate "encounters per patient by county".)
--- Timing: planning Q5-Q7 15 min; Q7 12:31-13:19.
 
 -- By county
 WITH chronic_recurring_list AS (
@@ -412,7 +409,6 @@ GROUP BY p.GENDER;
 -- Notes: a LEFT JOIN to the list with WHERE cr.PATIENT IS NULL (the anti-join from the orphan checks) gives the
 --   same result; NOT EXISTS was used here to practise the correlated pattern.
 -- Q?: Who are the 123? Possibly younger patients with shorter records (exposure time); test with age in Week 2.
--- Timing: Q8 13:20-13:50.
 
 -- By county
 WITH chronic_recurring_list AS (
@@ -472,16 +468,123 @@ GROUP BY p.GENDER;
 -- ===== What it costs =====
 
 -- Q9. What is the total and average cost of all encounters for patients with a chronic or recurring condition?
--- Tables: encounters, conditions | Technique: IN subquery on PATIENT (counts each encounter once)
+-- Tables: encounters, conditions | Technique: IN / NOT IN subqueries on PATIENT (counts each encounter once)
 -- Note: works at patient level because conditions are recorded once, at diagnosis (see Assumptions).
 --   Includes visits before diagnosis; filtering those out needs date arithmetic (Week 2).
 --   Shows both BASE_ENCOUNTER_COST and TOTAL_CLAIM_COST.
+--   NOT IN is safe here: profiling showed conditions.PATIENT is never NULL.
 -- Answer:
+-- Chronic-or-recurring (CR) patients are 89.39% of patients (1,036 of 1,159, Q6).
+--   They account for 95.98% of encounters (64,612 of 67,321) and 95.35% of claim cost ($172.55M of $180.97M).
+--   Base cost share is almost identical (95.38%, $7.23M of $7.58M).
+-- Per encounter, the 123 patients with neither cost more.
+--   Claim: $3,107.05 vs $2,670.63 for CR (about 16% higher).
+--   Base: $129.22 vs $111.90 (about 15% higher).
+-- Per patient, the trend reverses. CR patients cost $166,558.71 each in claims vs $68,430.98 (about 2.4x).
+--   Base shows the same: $6,978.75 vs $2,845.98 (about 2.5x).
+-- Volume drives the reversal. CR patients average about 62.4 encounters each vs about 22.0 (about 2.8x).
+--   More visits outweigh a lower cost per visit. This confirms the volume pattern from Q2 and Q3.
+-- Why neither costs more per encounter is open. Hypothesis: patients who need care less often
+--   may need a more expensive intervention when they do.
+--   The group is small (123 patients, 2,709 encounters) and claim cost is skewed,
+--   so a few large claims could lift the mean. Check encounter class mix and medians first (Week 2).
+-- So what: the cost sits in how often CR patients visit, not in what each visit costs.
+--   Reducing visit frequency is the prevention lever. Fits Q6: prevention may need to start early,
+--   before visits accumulate over a lifetime.
+-- Caveats: associated, not attributed. Lifetime totals, so longer records inflate CR figures
+--   (exposure time, see Limitations). A fair comparison adjusts for age and record length
+--   (cost per patient per year of record, Week 2).
+-- Reconciles: 64,612 + 2,709 = 67,321 encounters; $172,554,822.03 + $8,417,011.13 = $180,971,833.16.
+-- Q?: Rewrite as one CASE + GROUP BY (3 rows x 7 columns) instead of 21 scalar subquery columns.
 
--- Q10. Which encounters record no condition at all, what class are they, and what do they cost?
--- Tables: encounters, conditions | Technique: LEFT JOIN that changes the answer
--- Note: shows both BASE_ENCOUNTER_COST and TOTAL_CLAIM_COST.
+WITH chronic_recurring_list AS (
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NULL AND DESCRIPTION LIKE '%(disorder)'      -- chronic: any open episode
+
+    UNION
+
+    SELECT PATIENT
+    FROM 'conditions.csv'
+    WHERE STOP IS NOT NULL AND DESCRIPTION LIKE '%(disorder)'  -- recurring: 2+ closed episodes
+    GROUP BY PATIENT, CODE
+    HAVING COUNT(*) > 1
+)
+
+SELECT COUNT(*) AS num_cr_patients_encounters,
+       ROUND(AVG(BASE_ENCOUNTER_COST), 2) AS avg_cr_patients_base_cost,
+       ROUND(AVG(TOTAL_CLAIM_COST), 2) AS avg_cr_patients_total_cost,
+       ROUND(SUM(BASE_ENCOUNTER_COST), 2) AS sum_cr_patients_base_cost,
+       ROUND(SUM(TOTAL_CLAIM_COST), 2) AS sum_cr_patients_total_cost,
+       ROUND(SUM(BASE_ENCOUNTER_COST) / COUNT(DISTINCT PATIENT), 2) AS cr_per_patients_base_cost,
+       ROUND(SUM(TOTAL_CLAIM_COST) / COUNT(DISTINCT PATIENT), 2) AS cr_per_patients_total_cost,
+       (SELECT COUNT(*) FROM 'encounters.csv') AS num_all_patients_encounters,
+       (SELECT ROUND(AVG(BASE_ENCOUNTER_COST), 2) FROM 'encounters.csv') AS avg_all_patients_base_cost,
+       (SELECT ROUND(AVG(TOTAL_CLAIM_COST), 2) FROM 'encounters.csv') AS avg_all_patients_total_cost,
+       (SELECT ROUND(SUM(BASE_ENCOUNTER_COST), 2) FROM 'encounters.csv') AS sum_all_patients_base_cost,
+       (SELECT ROUND(SUM(TOTAL_CLAIM_COST), 2) FROM 'encounters.csv') AS sum_all_patients_total_cost,
+       (SELECT ROUND(SUM(BASE_ENCOUNTER_COST) / COUNT(DISTINCT PATIENT), 2) FROM 'encounters.csv') AS all_per_patients_base_cost,
+       (SELECT ROUND(SUM(TOTAL_CLAIM_COST) / COUNT(DISTINCT PATIENT), 2) FROM 'encounters.csv') AS all_per_patients_total_cost,
+       (SELECT COUNT(*) FROM 'encounters.csv' WHERE PATIENT NOT IN (SELECT PATIENT FROM chronic_recurring_list)) AS num_not_cr_encounters,
+       (SELECT ROUND(AVG(BASE_ENCOUNTER_COST), 2) FROM 'encounters.csv' WHERE PATIENT NOT IN (SELECT PATIENT FROM chronic_recurring_list)) AS avg_not_cr_base_cost,
+       (SELECT ROUND(AVG(TOTAL_CLAIM_COST), 2) FROM 'encounters.csv' WHERE PATIENT NOT IN (SELECT PATIENT FROM chronic_recurring_list)) AS avg_not_cr_total_cost,
+       (SELECT ROUND(SUM(BASE_ENCOUNTER_COST), 2) FROM 'encounters.csv' WHERE PATIENT NOT IN (SELECT PATIENT FROM chronic_recurring_list)) AS sum_not_cr_base_cost,
+       (SELECT ROUND(SUM(TOTAL_CLAIM_COST), 2) FROM 'encounters.csv' WHERE PATIENT NOT IN (SELECT PATIENT FROM chronic_recurring_list)) AS sum_not_cr_total_cost,
+       (SELECT ROUND(SUM(BASE_ENCOUNTER_COST) / COUNT(DISTINCT PATIENT), 2) FROM 'encounters.csv' WHERE PATIENT NOT IN (SELECT PATIENT FROM chronic_recurring_list)) AS not_cr_pp_base_cost,
+       (SELECT ROUND(SUM(TOTAL_CLAIM_COST) / COUNT(DISTINCT PATIENT), 2) FROM 'encounters.csv' WHERE PATIENT NOT IN (SELECT PATIENT FROM chronic_recurring_list)) AS not_cr_pp_total_cost
+FROM 'encounters.csv'
+WHERE PATIENT IN (SELECT PATIENT FROM chronic_recurring_list);
+
+-- Q10. Which encounters have no condition recorded, and what do they cost by encounter class?
+-- Tables: encounters, conditions | Technique: LEFT JOIN + IS NULL anti-join (the LEFT JOIN changes the answer)
+--   Shows both BASE_ENCOUNTER_COST and TOTAL_CLAIM_COST.
 -- Answer:
+-- 41,489 of 67,321 encounters (61.6%) have no condition recorded. Reconciles: 67,321 - 25,832 = 41,489.
+--   They carry $118.00M of $180.97M claim cost (65.2%) and $4.52M of $7.58M base cost (59.6%).
+-- Why LEFT JOIN: encounters is the base table, so every encounter is kept. Where no condition matches,
+--   c.ENCOUNTER is NULL, and WHERE c.ENCOUNTER IS NULL keeps only those rows.
+--   An INNER JOIN keeps only matches, so the same query returns 0 rows. It would hide 41,489 encounters
+--   and $118.00M of claim cost. Tested live: leaving out LEFT returned no rows.
+-- Volume: ambulatory dominates (30,779 encounters, $81.60M claim). The top row is "Encounter for problem"
+--   (16,128), then check-ups (4,720), prenatal visits (2,476) and other routine or follow-up visits.
+-- Cost per encounter: inpatient ($29,444.02), SNF ($16,456.58) and hospice ($10,664.83) cost most.
+--   Hypothesis: longer facility stays drive this. Untested; duration by class is a Week 2 query.
+-- Base cost per encounter barely moves by class ($100.14 to $142.58). Claim ranges from $614.65 to $29,444.02.
+--   Base cost can't see this difference, so total claim cost is the better measure for Week 2.
+-- With vs without a condition (subtraction from Q9 totals):
+--   with: $62,973,887.64 over 25,832 encounters = $2,437.82 per encounter.
+--   without: $117,997,945.52 over 41,489 encounters = $2,844.08 per encounter (about 17% higher).
+-- "No condition recorded" does not mean "unrelated to a condition". Conditions are recorded once,
+--   at diagnosis, so follow-ups and ongoing care for an existing condition can appear here.
+-- Open: what the 16,128 "Encounter for problem" visits are for. Two readings: ongoing care for a condition
+--   diagnosed earlier, or a visit where nothing was found. Test with REASONDESCRIPTION (filled ~65%).
+-- So what: most cost sits outside the condition link. Joining on conditions.ENCOUNTER (as in Q3) likely
+--   undercounts what conditions cost. Linking by patient (Q9) or by REASONCODE gives a fuller picture.
+-- Q?: Rate of inpatient, SNF, hospice and emergency encounters for CR vs neither, per year of record.
+-- Q?: Duration (STOP - START) by class, to test whether longer stays drive cost.
+-- Q?: REASONDESCRIPTION for no-condition "Encounter for problem" visits.
+-- DQ: a disorder used as an encounter code (PTSD, 5 rows); "Death Certification" has no SNOMED tag.
+
+-- Encounters by ENCOUNTERCLASS, CODE and DESCRIPTION
+SELECT e.ENCOUNTERCLASS, e.CODE, e.DESCRIPTION, COUNT(e.*) AS n_encounters
+FROM 'encounters.csv' AS e
+LEFT JOIN 'conditions.csv' as c ON e.Id = c.ENCOUNTER
+WHERE c.ENCOUNTER IS NULL
+GROUP BY e.ENCOUNTERCLASS, e.CODE, e.DESCRIPTION
+ORDER BY n_encounters DESC;
+
+-- Costs by ENCOUNTERCLASS
+SELECT e.ENCOUNTERCLASS, 
+       COUNT(e.*) AS n_encounters,
+       ROUND(SUM(e.BASE_ENCOUNTER_COST),2) AS class_base_total, 
+       ROUND(SUM(e.TOTAL_CLAIM_COST),2) AS class_claim_total,
+       ROUND(SUM(e.BASE_ENCOUNTER_COST) / COUNT(e.*),2) AS class_base_per_enc, 
+       ROUND(SUM(e.TOTAL_CLAIM_COST) / COUNT(e.*),2) AS class_claim_per_enc
+FROM 'encounters.csv' AS e
+LEFT JOIN 'conditions.csv' AS c ON e.Id = c.ENCOUNTER
+WHERE c.ENCOUNTER IS NULL
+GROUP BY e.ENCOUNTERCLASS
+ORDER BY class_claim_per_enc DESC;
 
 -- ===== Parked: Week 2 (dates, CASE, CTEs) =====
 -- Re-rank frequent visitors by encounters per year of record (birth to DEATHDATE or 2026-11-08), then revisit
